@@ -6,6 +6,7 @@ from mlx_lm.tool_parsers import (
     function_gemma,
     gemma4,
     glm47,
+    inkling,
     json_tools,
     kimi_k2,
     kimi_k3,
@@ -36,6 +37,10 @@ class TestToolParsing(unittest.TestCase):
             (
                 '{"name": "multiply", "arguments": {"a": 12234585, "b": 48838483920}}',
                 json_tools,
+            ),
+            (
+                '{"name": "multiply", "args": {"a": 12234585, "b": 48838483920}}',
+                inkling,
             ),
             (
                 '<invoke name="multiply">\n<parameter name="a">12234585</parameter>\n<parameter name="b">48838483920</parameter>\n</invoke>',
@@ -114,6 +119,10 @@ class TestToolParsing(unittest.TestCase):
             (
                 '{"name": "get_current_temperature", "arguments": {"location": "London"}}',
                 json_tools,
+            ),
+            (
+                '{"name": "get_current_temperature", "args": {"location": "London"}}',
+                inkling,
             ),
             (
                 '<invoke name="get_current_temperature">\n<parameter name="location">London</parameter>\n</invoke>',

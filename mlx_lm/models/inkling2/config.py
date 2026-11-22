@@ -8,7 +8,14 @@ __all__ = [
     "ModelArgs",
     "TextArgs",
     "VisionArgs",
+    "TOKENIZER_DEFAULTS",
 ]
+
+# Activate the Inkling response format and tool parser.
+TOKENIZER_DEFAULTS = {
+    "chat_template_type": "inkling",
+    "tool_parser_type": "inkling",
+}
 
 
 @dataclass

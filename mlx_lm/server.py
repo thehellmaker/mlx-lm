@@ -543,6 +543,10 @@ class ResponseGenerator:
         self.prompt_cache = prompt_cache
         self.requests = Queue()
 
+        # Rolling estimate of KV bytes per prompt token, used to size
+        # pre-prefill cache eviction.
+        self._kv_bytes_per_token = None
+
         self._time_budget = TimeBudget()
         self._is_distributed = mx.distributed.init().size() > 1
         self._rank = mx.distributed.init().rank()
@@ -581,6 +585,63 @@ class ResponseGenerator:
             n_bytes = stats["n_bytes"]
             logging.info(
                 f"- {cache_type}: {n_sequences} sequences, {n_bytes / 1e9:.2f} GB"
+            )
+
+    def _has_prompt_cache_byte_limit(self):
+        """Is a total cache size limit configured?"""
+        return self.model_provider.cli_args.prompt_cache_bytes is not None
+
+    def _is_kv_cost_calibrated(self):
+        """Do we know the real KV cost per token?"""
+        return self._kv_bytes_per_token is not None
+
+    def _prompt_cache_fits_in(self, target_bytes):
+        """Is the cache within the given byte budget?"""
+        return self.prompt_cache.nbytes <= target_bytes
+
+    def _estimated_kv_bytes_for(self, num_prompt_tokens):
+        """Estimate the KV bytes a prompt of this size will need."""
+        if self._is_kv_cost_calibrated():
+            return int(self._kv_bytes_per_token * num_prompt_tokens)
+        # No calibration yet: reserve half the cache budget.
+        return self.model_provider.cli_args.prompt_cache_bytes // 2
+
+    def _make_room_for_prompt(self, num_prompt_tokens):
+        """Evict old cache entries so a large prompt can prefill.
+
+        Prefill allocates memory before a request can add its cache, so
+        eviction must happen before prefill starts. The most recent entry
+        (usually this prompt's prefix) is last in LRU order, so it stays.
+        """
+        if not self._has_prompt_cache_byte_limit():
+            return
+
+        cache_limit = self.model_provider.cli_args.prompt_cache_bytes
+        prompt_bytes = self._estimated_kv_bytes_for(num_prompt_tokens)
+        target_cache_bytes = max(0, cache_limit - prompt_bytes)
+        if self._prompt_cache_fits_in(target_cache_bytes):
+            return
+
+        evicted_sequences = len(self.prompt_cache)
+        evicted_bytes = self.prompt_cache.nbytes
+        self.prompt_cache.trim_to(n_bytes=target_cache_bytes)
+        evicted_sequences -= len(self.prompt_cache)
+        evicted_bytes -= self.prompt_cache.nbytes
+        logging.info(
+            f"Evicted {evicted_sequences} prompt cache sequences "
+            f"({evicted_bytes / 1e9:.2f} GB) to fit a "
+            f"{num_prompt_tokens}-token prompt"
+        )
+
+    def _update_kv_bytes_per_token(self, cache_key, kv_caches):
+        """Learn the real KV cost per prompt token.
+
+        The cache also holds generated tokens, so the estimate runs
+        high and errs on the safe side.
+        """
+        if len(cache_key) > 0:
+            self._kv_bytes_per_token = (
+                sum(cache.nbytes for cache in kv_caches) / len(cache_key)
             )
 
     def _next_request(self, timeout=None):
@@ -1082,6 +1143,7 @@ class ResponseGenerator:
             # Load the KV cache
             self._log_cache_stats()
             cache_key = vision.cache_key if vision is not None else prompt[:]
+            self._make_room_for_prompt(len(cache_key))
             cache, rest = self.prompt_cache.fetch_nearest_cache(
                 self.model_provider.model_key, cache_key
             )
@@ -1154,6 +1216,7 @@ class ResponseGenerator:
             self.prompt_cache.insert_cache(
                 self.model_provider.model_key, cache_key, cache
             )
+            self._update_kv_bytes_per_token(cache_key, cache)
 
         except Exception as e:
             rqueue.put(e)

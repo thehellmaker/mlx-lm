@@ -206,6 +206,39 @@ class TestTextStateMachine(unittest.TestCase):
             TextStateMachine.Delta(content="a", reasoning="r", tool_calls=("x", "y")),
         )
 
+    def test_inkling_response_format(self):
+        from mlx_lm.chat_templates.inkling import RESPONSE_FORMAT
+        from mlx_lm.tool_parsers import inkling
+
+        tokenizer = SimpleNamespace(
+            has_thinking=False,
+            has_tool_calling=True,
+            tool_call_start=inkling.tool_call_start,
+            tool_call_end=inkling.tool_call_end,
+            structural_markers=(),
+            response_transitions=RESPONSE_FORMAT["transitions"],
+        )
+        reader = TextStateMachine.from_tokenizer(tokenizer).reader(
+            state=RESPONSE_FORMAT["initial_state"]
+        )
+        text = (
+            "<|message_model|><|content_thinking|>Think."
+            "<|end_message|><|message_model|><|content_text|>Hi."
+            "<|end_message|><|message_model|><|content_invoke_tool_json|>"
+            '{"name": "get_weather", "args": {"city": "Athens"}}'
+            "<|end_message|>"
+        )
+        # A marker split across chunks still matches.
+        self.assertEqual(reader.feed(text[:10]), TextStateMachine.Delta())
+        self.assertEqual(
+            reader.feed(text[10:]),
+            TextStateMachine.Delta(
+                content="Hi.",
+                reasoning="Think.",
+                tool_calls=('{"name": "get_weather", "args": {"city": "Athens"}}',),
+            ),
+        )
+
     def test_unknown_state_raises(self):
         with self.assertRaises(ValueError):
             TextStateMachine({"normal": [("<x>", "other")]})
